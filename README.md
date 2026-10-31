@@ -2,7 +2,9 @@
 > [`iot-mcp-servers`](https://github.com/nagarjunr/iot-mcp-servers), created
 > specifically for Code Ocean's Git-import feature (which requires a public
 > repository). It packages the iot-mcp-servers code for reproducible test runs. See `code_ocean/` for
-> the capsule configuration. Code Ocean: MCP for Industrial IoT: Design Principles for Safe, Vendor-Neutral AI-to-OT Integration
+> the capsule configuration.
+>
+> Code Ocean: MCP for Industrial IoT: Design Principles for Safe, Vendor-Neutral AI-to-OT Integration
 
 # IoT MCP Servers
 
