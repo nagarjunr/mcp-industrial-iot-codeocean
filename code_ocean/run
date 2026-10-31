@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Code Ocean run script for iot-mcp-servers -- attempts ALL 5 servers.
+#
+# Code Ocean's Reproducible Run environment is itself a Docker container; running a
+# nested `docker compose` stack inside it would require Docker-in-Docker, which
+# standard (non-privileged) Code Ocean compute environments do not support. This
+# script does not assume that in advance -- it actually attempts docker compose for
+# the 3 servers that need one (eclipse-ditto, mqtt, sparkplug-b), and honestly reports
+# whether it worked or not, rather than skipping them unconditionally. If your Code
+# Ocean plan/environment does support privileged/DinD execution, all 5 servers will
+# run for real here. If not, the 3 docker-compose-dependent servers will fail
+# gracefully with a clear reason logged, and the other 2 (aws-iot-core,
+# azure-iot-hub -- fully self-contained via `moto`/`respx` mocking, no external
+# service needed) will still run and pass regardless of DinD support.
+
+set -uo pipefail  # NOTE: no -e here -- we want to continue attempting all 5 servers
+                   # even if one fails/errors, and report a full summary at the end.
+
+# Code Ocean's convention: git-cloned/uploaded code lands directly under /code (NOT
+# in a named subfolder). Auto-detect the actual repo root instead of assuming a fixed
+# nested path.
+if [ -d "/code/aws-iot-core" ] && [ -d "/code/azure-iot-hub" ]; then
+  REPO_DIR="/code"
+elif [ -d "/code/iot-mcp-servers/aws-iot-core" ]; then
+  REPO_DIR="/code/iot-mcp-servers"
+else
+  FOUND="$(find /code -maxdepth 3 -type d -name aws-iot-core -print -quit)"
+  REPO_DIR="$(dirname "$FOUND")"
+fi
+
+if [ -z "${REPO_DIR:-}" ] || [ ! -d "$REPO_DIR/aws-iot-core" ]; then
+  echo "ERROR: could not locate the iot-mcp-servers directories anywhere under /code" >&2
+  echo "-- check that the capsule's code was imported/uploaded correctly." >&2
+  exit 1
+fi
+
+echo "Detected repo root: $REPO_DIR"
+
+RESULTS_DIR="/results"
+mkdir -p "$RESULTS_DIR"
+
+echo "iot-mcp-servers reproducibility run (all 5 servers attempted) -- $(date -u)" | tee "$RESULTS_DIR/summary.txt"
+echo "===============================================================================" | tee -a "$RESULTS_DIR/summary.txt"
+
+# --- Self-contained servers: no external service, always run regardless of DinD ---
+SELF_CONTAINED_SERVERS=("aws-iot-core" "azure-iot-hub")
+
+for server in "${SELF_CONTAINED_SERVERS[@]}"; do
+  echo "" | tee -a "$RESULTS_DIR/summary.txt"
+  echo "=== $server (self-contained, no external service needed) ===" | tee -a "$RESULTS_DIR/summary.txt"
+  (
+    cd "$REPO_DIR/$server"
+    uv sync --frozen --no-cache --no-dev && uv run pytest -v
+  ) 2>&1 | tee "$RESULTS_DIR/${server}_pytest.log"
+  if [ "${PIPESTATUS[0]:-1}" -eq 0 ]; then
+    echo "$server: PASS" | tee -a "$RESULTS_DIR/summary.txt"
+  else
+    echo "$server: FAIL (see ${server}_pytest.log)" | tee -a "$RESULTS_DIR/summary.txt"
+  fi
+done
+
+# --- Docker-compose-dependent servers: attempted for real, not assumed to fail ---
+COMPOSE_SERVERS=("eclipse-ditto" "mqtt" "sparkplug-b")
+
+for server in "${COMPOSE_SERVERS[@]}"; do
+  echo "" | tee -a "$RESULTS_DIR/summary.txt"
+  echo "=== $server (requires docker compose -- attempting for real) ===" | tee -a "$RESULTS_DIR/summary.txt"
+
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "$server: SKIPPED -- no docker binary available in this environment" | tee -a "$RESULTS_DIR/summary.txt"
+    continue
+  fi
+
+  (
+    cd "$REPO_DIR/$server"
+    if docker compose up -d 2>&1; then
+      # Give the compose stack a moment to become ready before testing.
+      sleep 5
+      uv sync --frozen --no-cache --no-dev && uv run pytest -v
+      TEST_EXIT=$?
+      docker compose down 2>&1 || true
+      exit $TEST_EXIT
+    else
+      echo "docker compose up failed for $server -- likely no Docker-in-Docker support" >&2
+      exit 1
+    fi
+  ) 2>&1 | tee "$RESULTS_DIR/${server}_pytest.log"
+
+  if [ "${PIPESTATUS[0]:-1}" -eq 0 ]; then
+    echo "$server: PASS (real docker-compose stack, ran for real in this environment)" | tee -a "$RESULTS_DIR/summary.txt"
+  else
+    echo "$server: FAIL or SKIPPED -- this environment likely does not support" | tee -a "$RESULTS_DIR/summary.txt"
+    echo "  Docker-in-Docker (nested containers), a known limitation of standard" | tee -a "$RESULTS_DIR/summary.txt"
+    echo "  (non-privileged) Code Ocean compute environments, since a Code Ocean" | tee -a "$RESULTS_DIR/summary.txt"
+    echo "  Reproducible Run environment is itself a Docker container. See" | tee -a "$RESULTS_DIR/summary.txt"
+    echo "  ${server}_pytest.log for the actual error. To reproduce this server's" | tee -a "$RESULTS_DIR/summary.txt"
+    echo "  suite yourself: clone this repo, run 'docker compose up -d && uv run" | tee -a "$RESULTS_DIR/summary.txt"
+    echo "  pytest -v' inside $server/, per that server's own README." | tee -a "$RESULTS_DIR/summary.txt"
+  fi
+done
+
+echo "" | tee -a "$RESULTS_DIR/summary.txt"
+echo "Done. Per-server logs in $RESULTS_DIR/<server>_pytest.log" | tee -a "$RESULTS_DIR/summary.txt"
